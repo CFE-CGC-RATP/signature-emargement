@@ -5,50 +5,50 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Émargement</title>
 <style>
-body { font-family: system-ui; margin: 16px; }
-.box { max-width: 520px; margin: auto; }
+  body { font-family: system-ui; margin: 16px; }
+  .box { max-width: 520px; margin: auto; }
 
-.infoBox{
-  margin: 12px 0 14px;
-  padding: 12px 14px;
-  border: 1px solid #ddd;
-  border-radius: 12px;
-  background: #f7f7f7;
-}
-.bigName{
-  font-size: 28px;
-  font-weight: 800;
-  line-height: 1.1;
-}
-.bigEvent{
-  margin-top: 6px;
-  font-size: 18px;
-  font-weight: 600;
-}
-.small { font-size: 13px; color: #666; }
+  .infoBox{
+    margin: 12px 0 14px;
+    padding: 12px 14px;
+    border: 1px solid #ddd;
+    border-radius: 12px;
+    background: #f7f7f7;
+  }
+  .bigName{
+    font-size: 28px;
+    font-weight: 800;
+    line-height: 1.1;
+  }
+  .bigEvent{
+    margin-top: 6px;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .small { font-size: 13px; color: #666; }
 
-#readerWrap{
-  margin: 12px 0 12px;
-  padding: 10px;
-  border: 1px solid #ddd;
-  border-radius: 12px;
-}
-#reader{
-  width: 100%;
-}
-canvas {
-  border: 1px solid #444;
-  border-radius: 12px;
-  width: 100%;
-  height: 220px;
-  touch-action: none;
-}
-button {
-  margin-top: 12px;
-  padding: 10px 16px;
-  font-size: 16px;
-}
-.btnRow{ display:flex; gap:10px; flex-wrap:wrap; }
+  #readerWrap{
+    margin: 12px 0 12px;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 12px;
+  }
+  #reader{ width: 100%; }
+
+  canvas {
+    border: 1px solid #444;
+    border-radius: 12px;
+    width: 100%;
+    height: 220px;
+    touch-action: none;
+  }
+  button {
+    margin-top: 10px;
+    padding: 10px 14px;
+    font-size: 16px;
+  }
+  .btnRow { display:flex; gap:10px; flex-wrap:wrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -61,9 +61,24 @@ button {
   </div>
 
   <div id="readerWrap">
-    <div class="small" style="margin-bottom:8px;">Scanner le QR code (caméra)</div>
-    <div id="reader"></div>
-    <div id="scanStatus" class="small" style="margin-top:8px;">Autorisez la caméra si demandé.</div>
+    <div class="small" style="margin-bottom:8px;">
+      Scanner le QR (iPhone : cliquez sur “Démarrer le scan”, puis autorisez la caméra).
+    </div>
+
+    <div class="btnRow">
+      <button id="btnStartScan">Démarrer le scan</button>
+      <button id="btnStopScan" disabled>Arrêter le scan</button>
+    </div>
+
+    <div id="reader" style="margin-top:10px;"></div>
+
+    <div id="scanStatus" class="small" style="margin-top:8px;">En attente…</div>
+    <div class="small mono" id="lastQr" style="margin-top:6px;"></div>
+
+    <div class="small" style="margin-top:10px;">
+      Si ton QR contient une URL complète, il doit ressembler à :
+      <div class="mono">https://.../?prenom=Jean&nom=Dupont&event=AG2026&t=ABC123</div>
+    </div>
   </div>
 
   <canvas id="sign"></canvas>
@@ -80,56 +95,92 @@ button {
 <script src="https://unpkg.com/html5-qrcode"></script>
 
 <script>
-// ====== Etat "kiosque" ======
-window._prenom = "";
-window._nom = "";
-window._event = "";
-window._token = "";
+/** ========= CONFIG =========
+ * Remplace par l'URL de ton webhook Power Automate (When an HTTP request is received)
+ */
+const POWER_AUTOMATE_URL = "TON_URL_POWER_AUTOMATE";
+
+/** ========= Etat kiosque ========= */
+let current = { prenom: "", nom: "", event: "", token: "" };
 
 function updateInfo() {
-  const fullName = ((window._prenom || "") + " " + (window._nom || "")).trim();
+  const fullName = ((current.prenom || "") + " " + (current.nom || "")).trim();
   document.getElementById("name").textContent = fullName || "Invité";
-  document.getElementById("eventLine").textContent = window._event || "";
+  document.getElementById("eventLine").textContent = current.event || "";
 }
 
-// Permet aussi un test en passant des params dans l'URL de la page
+function setStatus(text) {
+  document.getElementById("scanStatus").textContent = text;
+}
+
+function setMsg(text) {
+  document.getElementById("msg").textContent = text;
+}
+
+function setLastQr(text) {
+  document.getElementById("lastQr").textContent = text ? ("Dernier QR: " + text) : "";
+}
+
+/** ========= Si on ouvre la page avec paramètres (mode test) ========= */
 (function loadFromPageUrlIfPresent(){
   const qs = new URLSearchParams(location.search);
   const p = qs.get("prenom");
   const n = qs.get("nom");
   const ev = qs.get("event");
   const t = qs.get("t");
+
   if (p || n || ev || t) {
-    window._prenom = p || "";
-    window._nom = n || "";
-    window._event = ev || "";
-    window._token = t || "";
+    current.prenom = p || "";
+    current.nom = n || "";
+    current.event = ev || "";
+    current.token = t || "";
   }
   updateInfo();
 })();
 
-function applyFromQrUrl(decodedText) {
-  // Le QR doit contenir une URL complète (ex: https://.../?prenom=...&nom=...&event=...&t=...)
-  const u = new URL(decodedText);
-  const q = u.searchParams;
+/** ========= Interprétation du contenu du QR =========
+ * - Cas idéal: QR contient une URL complète avec ?prenom=&nom=&event=&t=
+ * - Sinon: on garde le texte lu en "token" (à toi de décider côté Power Automate comment le traiter)
+ */
+function applyFromQr(decodedText) {
+  setLastQr(decodedText);
+  setMsg("");
 
-  window._prenom = q.get("prenom") || "";
-  window._nom = q.get("nom") || "";
-  window._event = q.get("event") || "";
-  window._token = q.get("t") || "";
+  // Essaye de lire comme URL
+  try {
+    const u = new URL(decodedText);
+    const q = u.searchParams;
 
+    const prenom = q.get("prenom") || "";
+    const nom = q.get("nom") || "";
+    const event = q.get("event") || "";
+    const token = q.get("t") || "";
+
+    // Si au moins un champ est présent, on applique
+    if (prenom || nom || event || token) {
+      current = { prenom, nom, event, token };
+      updateInfo();
+      clearPad();
+      setStatus("QR détecté ✓");
+      return;
+    }
+  } catch (e) {
+    // pas une URL, on tombe dans le fallback
+  }
+
+  // Fallback: QR non URL -> on met tout en token
+  current = { prenom: "", nom: "", event: "", token: decodedText || "" };
   updateInfo();
   clearPad();
-  document.getElementById("msg").textContent = "";
+  setStatus("QR détecté (texte). Il devrait idéalement contenir une URL complète.");
 }
 
-// ====== Signature pad ======
+/** ========= Signature pad ========= */
 const canvas = document.getElementById("sign");
 const ctx = canvas.getContext("2d");
 
 function resizeCanvas() {
   const r = devicePixelRatio || 1;
-  // reset scale (sinon double-scale si on rappelle)
   ctx.setTransform(1,0,0,1,0,0);
   canvas.width = canvas.offsetWidth * r;
   canvas.height = canvas.offsetHeight * r;
@@ -140,7 +191,7 @@ function resizeCanvas() {
 resizeCanvas();
 window.addEventListener("resize", resizeCanvas);
 
-let draw = false;
+let drawing = false;
 let last = null;
 
 function pos(e){
@@ -149,9 +200,9 @@ function pos(e){
   return { x: t.clientX - r.left, y: t.clientY - r.top };
 }
 
-canvas.addEventListener("touchstart", e => { draw=true; last=pos(e); e.preventDefault(); }, {passive:false});
+canvas.addEventListener("touchstart", e => { drawing=true; last=pos(e); e.preventDefault(); }, {passive:false});
 canvas.addEventListener("touchmove", e => {
-  if(!draw) return;
+  if(!drawing) return;
   const p = pos(e);
   ctx.beginPath();
   ctx.moveTo(last.x, last.y);
@@ -160,72 +211,97 @@ canvas.addEventListener("touchmove", e => {
   last = p;
   e.preventDefault();
 }, {passive:false});
-canvas.addEventListener("touchend", () => draw=false);
+canvas.addEventListener("touchend", () => drawing=false);
 
 function clearPad(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
 }
 
-// ====== Envoi vers Power Automate ======
+/** ========= Envoi ========= */
 async function send(){
-  if (!window._prenom && !window._nom && !window._event && !window._token) {
-    document.getElementById("msg").textContent = "Scannez d'abord un QR code.";
+  if (!POWER_AUTOMATE_URL || POWER_AUTOMATE_URL === "TON_URL_POWER_AUTOMATE") {
+    setMsg("⚠️ Renseigne d'abord POWER_AUTOMATE_URL dans le code.");
+    return;
+  }
+
+  // Vérif minimale : au moins un token ou nom/prénom/event
+  if (!current.token && !current.prenom && !current.nom && !current.event) {
+    setMsg("Scanne d'abord un QR code.");
     return;
   }
 
   const img = canvas.toDataURL("image/png");
 
   try {
-    await fetch("TON_URL_POWER_AUTOMATE", {
+    await fetch(POWER_AUTOMATE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        token: window._token,
-        prenom: window._prenom,
-        nom: window._nom,
-        event: window._event,
-        signature: img
+        token: current.token,
+        prenom: current.prenom,
+        nom: current.nom,
+        event: current.event,
+        signature: img,
+        ts: new Date().toISOString()
       })
     });
 
-    document.getElementById("msg").textContent = "Signature enregistrée. Merci.";
+    setMsg("✅ Signature enregistrée. Merci.");
   } catch (e) {
-    document.getElementById("msg").textContent = "Erreur d'envoi (réseau ?).";
+    setMsg("❌ Erreur d'envoi (réseau ? URL Power Automate ?).");
   }
 }
 
-// ====== Démarrage QR scanner ======
-(async function startQrScanner(){
-  const status = document.getElementById("scanStatus");
+/** ========= QR scanner iPhone-friendly ========= */
+let qr = null;
+let scanning = false;
+
+async function startScan(){
+  if (scanning) return;
+
   try {
-    const cameras = await Html5Qrcode.getCameras();
-    if (!cameras || cameras.length === 0) {
-      status.textContent = "Aucune caméra détectée.";
-      return;
-    }
+    if (!qr) qr = new Html5Qrcode("reader");
 
-    // Sur mobile, souvent la dernière = caméra arrière
-    const camId = cameras[cameras.length - 1].id;
+    setStatus("Démarrage caméra…");
+    setMsg("");
 
-    const qr = new Html5Qrcode("reader");
-    status.textContent = "Caméra prête. Présentez le QR code.";
-
+    // iOS : démarrage après clic + forcer caméra arrière
     await qr.start(
-      camId,
+      { facingMode: "environment" },
       { fps: 10, qrbox: { width: 250, height: 250 } },
       (decodedText) => {
-        try {
-          applyFromQrUrl(decodedText);
-          status.textContent = "QR détecté ✓";
-        } catch (e) {
-          status.textContent = "QR non reconnu (il doit contenir une URL).";
-        }
+        applyFromQr(decodedText);
+      },
+      (_err) => {
+        // bruit de scan -> on ignore
       }
     );
+
+    scanning = true;
+    document.getElementById("btnStartScan").disabled = true;
+    document.getElementById("btnStopScan").disabled = false;
+    setStatus("Caméra prête. Présentez le QR code.");
   } catch (e) {
-    status.textContent = "Caméra bloquée (autorisation refusée ?).";
+    scanning = false;
+    document.getElementById("btnStartScan").disabled = false;
+    document.getElementById("btnStopScan").disabled = true;
+
+    // Causes fréquentes iPhone: autorisation caméra refusée, page pas en HTTPS (GitHub ok), pas Safari…
+    setStatus("Caméra bloquée. Vérifie : Safari + autorisation caméra (Réglages iOS > Safari > Caméra).");
   }
-})();
+}
+
+async function stopScan(){
+  if (!qr || !scanning) return;
+  try { await qr.stop(); } catch(e) {}
+  scanning = false;
+  document.getElementById("btnStartScan").disabled = false;
+  document.getElementById("btnStopScan").disabled = true;
+  setStatus("Scan arrêté.");
+}
+
+document.getElementById("btnStartScan").addEventListener("click", startScan);
+document.getElementById("btnStopScan").addEventListener("click", stopScan);
 </script>
 </body>
 </html>
