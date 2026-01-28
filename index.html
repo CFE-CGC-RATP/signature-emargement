@@ -39,4 +39,251 @@
     padding: 10px 14px;
     font-size: 16px;
   }
-  .bt
+  .btnRow { display:flex; gap:10px; flex-wrap:wrap; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h2>Signature de présence</h2>
+
+  <div class="infoBox">
+    <div id="name" class="bigName">Invité</div>
+    <div id="eventLine" class="bigEvent"></div>
+  </div>
+
+  <!-- SCAN QR -->
+  <div id="readerWrap">
+    <div class="small" style="margin-bottom:8px;">
+      iPhone : cliquez sur “Démarrer le scan”, puis autorisez la caméra.
+    </div>
+
+    <div class="btnRow">
+      <button id="btnStartScan">Démarrer le scan</button>
+      <button id="btnStopScan" disabled>Arrêter le scan</button>
+    </div>
+
+    <div id="reader" style="margin-top:10px;"></div>
+    <div id="scanStatus" class="small" style="margin-top:8px;">En attente…</div>
+  </div>
+
+  <!-- Zone signature -->
+  <div id="signatureArea"></div>
+  <canvas id="sign"></canvas>
+
+  <div class="btnRow">
+    <button onclick="clearPad()">Effacer</button>
+    <button onclick="send()">Valider</button>
+  </div>
+
+  <div id="msg" class="small"></div>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode"></script>
+
+<script>
+/** ========= CONFIG ========= */
+const POWER_AUTOMATE_URL = "TON_URL_POWER_AUTOMATE";
+
+/** ========= Etat kiosque ========= */
+let current = { prenom: "", nom: "", event: "", token: "" };
+
+function updateInfo() {
+  const fullName = ((current.prenom || "") + " " + (current.nom || "")).trim();
+  document.getElementById("name").textContent = fullName || "Invité";
+  document.getElementById("eventLine").textContent = current.event || "";
+}
+function setStatus(text) { document.getElementById("scanStatus").textContent = text; }
+function setMsg(text) { document.getElementById("msg").textContent = text; }
+
+/** ========= Signature pad ========= */
+const canvas = document.getElementById("sign");
+const ctx = canvas.getContext("2d");
+
+function resizeCanvas() {
+  const r = devicePixelRatio || 1;
+  ctx.setTransform(1,0,0,1,0,0);
+  canvas.width = canvas.offsetWidth * r;
+  canvas.height = canvas.offsetHeight * r;
+  ctx.scale(r, r);
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+}
+resizeCanvas();
+window.addEventListener("resize", resizeCanvas);
+
+let drawing = false;
+let last = null;
+
+function pos(e){
+  const t = e.touches ? e.touches[0] : e;
+  const r = canvas.getBoundingClientRect();
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+
+canvas.addEventListener("touchstart", e => { drawing=true; last=pos(e); e.preventDefault(); }, {passive:false});
+canvas.addEventListener("touchmove", e => {
+  if(!drawing) return;
+  const p = pos(e);
+  ctx.beginPath();
+  ctx.moveTo(last.x, last.y);
+  ctx.lineTo(p.x, p.y);
+  ctx.stroke();
+  last = p;
+  e.preventDefault();
+}, {passive:false});
+canvas.addEventListener("touchend", () => drawing=false);
+
+function clearPad(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+}
+
+/** ========= QR scanner ========= */
+let qr = null;
+let scanning = false;
+let scanLocked = false; // évite les doubles lectures iPhone
+
+async function startScan(){
+  if (scanning) return;
+
+  scanLocked = false; // on déverrouille pour le prochain invité
+
+  try {
+    if (!qr) qr = new Html5Qrcode("reader");
+
+    setMsg("");
+    setStatus("Démarrage caméra…");
+
+    await qr.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      (decodedText) => {
+        // IMPORTANT: callback non-await => on lock tout de suite
+        if (scanLocked) return;
+        scanLocked = true;
+        handleQr(decodedText);
+      },
+      (_err) => {}
+    );
+
+    scanning = true;
+    document.getElementById("btnStartScan").disabled = true;
+    document.getElementById("btnStopScan").disabled = false;
+    setStatus("Caméra prête. Présentez le QR.");
+  } catch (e) {
+    scanning = false;
+    document.getElementById("btnStartScan").disabled = false;
+    document.getElementById("btnStopScan").disabled = true;
+    setStatus("Caméra bloquée. Vérifie Safari + autorisation caméra (Réglages iOS > Safari > Caméra).");
+  }
+}
+
+async function stopScan(){
+  if (!qr || !scanning) return;
+
+  // pause immédiate (très important iPhone)
+  try { qr.pause(true); } catch(e) {}
+
+  try { await qr.stop(); } catch(e) {}
+
+  scanning = false;
+  document.getElementById("btnStartScan").disabled = false;
+  document.getElementById("btnStopScan").disabled = true;
+  setStatus("Scan arrêté.");
+}
+
+// Interprète le QR
+function parseQr(decodedText) {
+  // Le QR idéal contient une URL complète: ?prenom=&nom=&event=&t=
+  try {
+    const u = new URL(decodedText);
+    const q = u.searchParams;
+    return {
+      prenom: q.get("prenom") || "",
+      nom: q.get("nom") || "",
+      event: q.get("event") || "",
+      token: q.get("t") || ""
+    };
+  } catch (e) {
+    // sinon, on met tout dans token
+    return { prenom: "", nom: "", event: "", token: decodedText || "" };
+  }
+}
+
+// Quand un QR est lu: stop + scroll signature
+async function handleQr(decodedText) {
+  current = parseQr(decodedText);
+  updateInfo();
+  clearPad();
+  setMsg("");
+  setStatus("QR détecté ✓");
+
+  // 1) Stopper le scan (pause + stop)
+  await stopScan();
+
+  // 2) Aller au pavé signature
+  document.getElementById("signatureArea").scrollIntoView({ behavior: "smooth" });
+
+  // 3) Masquer le scanner après le scroll (petit délai pour iPhone)
+  setTimeout(() => {
+    document.getElementById("readerWrap").classList.add("hidden");
+  }, 300);
+}
+
+/** ========= Envoi + reset + scan suivant ========= */
+async function send(){
+  if (!POWER_AUTOMATE_URL || POWER_AUTOMATE_URL === "TON_URL_POWER_AUTOMATE") {
+    setMsg("⚠️ Renseigne POWER_AUTOMATE_URL dans le code.");
+    return;
+  }
+  if (!current.token && !current.prenom && !current.nom && !current.event) {
+    setMsg("Scanne d'abord un QR code.");
+    return;
+  }
+
+  const img = canvas.toDataURL("image/png");
+
+  try {
+    await fetch(POWER_AUTOMATE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: current.token,
+        prenom: current.prenom,
+        nom: current.nom,
+        event: current.event,
+        signature: img,
+        ts: new Date().toISOString()
+      })
+    });
+
+    setMsg("✅ Signature enregistrée. Merci.");
+
+    // Reset + prochain scan
+    setTimeout(async () => {
+      current = { prenom: "", nom: "", event: "", token: "" };
+      updateInfo();
+      clearPad();
+      setStatus("Prêt pour le prochain QR.");
+
+      // Réafficher le scanner
+      document.getElementById("readerWrap").classList.remove("hidden");
+      document.getElementById("readerWrap").scrollIntoView({ behavior: "smooth" });
+
+      // Redémarrer le scan
+      await startScan();
+    }, 1200);
+
+  } catch (e) {
+    setMsg("❌ Erreur d'envoi (réseau ? URL Power Automate ?).");
+    // Déverrouille au cas où tu veux re-scanner
+    scanLocked = false;
+  }
+}
+
+/** ========= Boutons ========= */
+document.getElementById("btnStartScan").addEventListener("click", startScan);
+document.getElementById("btnStopScan").addEventListener("click", stopScan);
+</script>
+</body>
+</html>
