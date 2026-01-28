@@ -64,8 +64,10 @@ const nom = qs.get("nom");
 const event = qs.get("event");
 const token = qs.get("t");
 
-document.getElementById("info").textContent =
-  prenom + " " + nom + " — " + event;
+const fullName = ((prenom || "") + " " + (nom || "")).trim();
+document.getElementById("name").textContent = fullName || "Invité";
+document.getElementById("eventLine").textContent = event || "";
+
 
 const canvas = document.getElementById("sign");
 const ctx = canvas.getContext("2d");
