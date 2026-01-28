@@ -7,19 +7,7 @@
 <style>
 body { font-family: system-ui; margin: 16px; }
 .box { max-width: 520px; margin: auto; }
-canvas {
-  border: 1px solid #444;
-  border-radius: 12px;
-  width: 100%;
-  height: 220px;
-  touch-action: none;
-}
-button {
-  margin-top: 12px;
-  padding: 10px 16px;
-  font-size: 16px;
-}
-.small { font-size: 13px; color: #666; }
+
 .infoBox{
   margin: 12px 0 14px;
   padding: 12px 14px;
@@ -37,50 +25,120 @@ button {
   font-size: 18px;
   font-weight: 600;
 }
+.small { font-size: 13px; color: #666; }
 
+#readerWrap{
+  margin: 12px 0 12px;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 12px;
+}
+#reader{
+  width: 100%;
+}
+canvas {
+  border: 1px solid #444;
+  border-radius: 12px;
+  width: 100%;
+  height: 220px;
+  touch-action: none;
+}
+button {
+  margin-top: 12px;
+  padding: 10px 16px;
+  font-size: 16px;
+}
+.btnRow{ display:flex; gap:10px; flex-wrap:wrap; }
 </style>
 </head>
 <body>
 <div class="box">
   <h2>Signature de présence</h2>
-  <div class="infoBox">
-  <div id="name" class="bigName"></div>
-  <div id="eventLine" class="bigEvent"></div>
-</div>
 
+  <div class="infoBox">
+    <div id="name" class="bigName">Invité</div>
+    <div id="eventLine" class="bigEvent"></div>
+  </div>
+
+  <div id="readerWrap">
+    <div class="small" style="margin-bottom:8px;">Scanner le QR code (caméra)</div>
+    <div id="reader"></div>
+    <div id="scanStatus" class="small" style="margin-top:8px;">Autorisez la caméra si demandé.</div>
+  </div>
 
   <canvas id="sign"></canvas>
 
-  <button onclick="clearPad()">Effacer</button>
-  <button onclick="send()">Valider</button>
+  <div class="btnRow">
+    <button onclick="clearPad()">Effacer</button>
+    <button onclick="send()">Valider</button>
+  </div>
 
   <div id="msg" class="small"></div>
 </div>
 
+<!-- Lecteur QR -->
+<script src="https://unpkg.com/html5-qrcode"></script>
+
 <script>
-const qs = new URLSearchParams(location.search);
-const prenom = qs.get("prenom");
-const nom = qs.get("nom");
-const event = qs.get("event");
-const token = qs.get("t");
+// ====== Etat "kiosque" ======
+window._prenom = "";
+window._nom = "";
+window._event = "";
+window._token = "";
 
-const fullName = ((prenom || "") + " " + (nom || "")).trim();
-document.getElementById("name").textContent = fullName || "Invité";
-document.getElementById("eventLine").textContent = event || "";
+function updateInfo() {
+  const fullName = ((window._prenom || "") + " " + (window._nom || "")).trim();
+  document.getElementById("name").textContent = fullName || "Invité";
+  document.getElementById("eventLine").textContent = window._event || "";
+}
 
+// Permet aussi un test en passant des params dans l'URL de la page
+(function loadFromPageUrlIfPresent(){
+  const qs = new URLSearchParams(location.search);
+  const p = qs.get("prenom");
+  const n = qs.get("nom");
+  const ev = qs.get("event");
+  const t = qs.get("t");
+  if (p || n || ev || t) {
+    window._prenom = p || "";
+    window._nom = n || "";
+    window._event = ev || "";
+    window._token = t || "";
+  }
+  updateInfo();
+})();
 
+function applyFromQrUrl(decodedText) {
+  // Le QR doit contenir une URL complète (ex: https://.../?prenom=...&nom=...&event=...&t=...)
+  const u = new URL(decodedText);
+  const q = u.searchParams;
+
+  window._prenom = q.get("prenom") || "";
+  window._nom = q.get("nom") || "";
+  window._event = q.get("event") || "";
+  window._token = q.get("t") || "";
+
+  updateInfo();
+  clearPad();
+  document.getElementById("msg").textContent = "";
+}
+
+// ====== Signature pad ======
 const canvas = document.getElementById("sign");
 const ctx = canvas.getContext("2d");
 
-function resize() {
+function resizeCanvas() {
   const r = devicePixelRatio || 1;
+  // reset scale (sinon double-scale si on rappelle)
+  ctx.setTransform(1,0,0,1,0,0);
   canvas.width = canvas.offsetWidth * r;
   canvas.height = canvas.offsetHeight * r;
   ctx.scale(r, r);
   ctx.lineWidth = 2;
   ctx.lineCap = "round";
 }
-resize();
+resizeCanvas();
+window.addEventListener("resize", resizeCanvas);
 
 let draw = false;
 let last = null;
@@ -91,7 +149,7 @@ function pos(e){
   return { x: t.clientX - r.left, y: t.clientY - r.top };
 }
 
-canvas.addEventListener("touchstart", e => { draw=true; last=pos(e); e.preventDefault(); });
+canvas.addEventListener("touchstart", e => { draw=true; last=pos(e); e.preventDefault(); }, {passive:false});
 canvas.addEventListener("touchmove", e => {
   if(!draw) return;
   const p = pos(e);
@@ -101,27 +159,73 @@ canvas.addEventListener("touchmove", e => {
   ctx.stroke();
   last = p;
   e.preventDefault();
-});
+}, {passive:false});
 canvas.addEventListener("touchend", () => draw=false);
 
 function clearPad(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
 }
 
+// ====== Envoi vers Power Automate ======
 async function send(){
+  if (!window._prenom && !window._nom && !window._event && !window._token) {
+    document.getElementById("msg").textContent = "Scannez d'abord un QR code.";
+    return;
+  }
+
   const img = canvas.toDataURL("image/png");
 
-  await fetch("TON_URL_POWER_AUTOMATE", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      token, prenom, nom, event,
-      signature: img
-    })
-  });
+  try {
+    await fetch("TON_URL_POWER_AUTOMATE", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: window._token,
+        prenom: window._prenom,
+        nom: window._nom,
+        event: window._event,
+        signature: img
+      })
+    });
 
-  document.getElementById("msg").textContent = "Signature enregistrée. Merci.";
+    document.getElementById("msg").textContent = "Signature enregistrée. Merci.";
+  } catch (e) {
+    document.getElementById("msg").textContent = "Erreur d'envoi (réseau ?).";
+  }
 }
+
+// ====== Démarrage QR scanner ======
+(async function startQrScanner(){
+  const status = document.getElementById("scanStatus");
+  try {
+    const cameras = await Html5Qrcode.getCameras();
+    if (!cameras || cameras.length === 0) {
+      status.textContent = "Aucune caméra détectée.";
+      return;
+    }
+
+    // Sur mobile, souvent la dernière = caméra arrière
+    const camId = cameras[cameras.length - 1].id;
+
+    const qr = new Html5Qrcode("reader");
+    status.textContent = "Caméra prête. Présentez le QR code.";
+
+    await qr.start(
+      camId,
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      (decodedText) => {
+        try {
+          applyFromQrUrl(decodedText);
+          status.textContent = "QR détecté ✓";
+        } catch (e) {
+          status.textContent = "QR non reconnu (il doit contenir une URL).";
+        }
+      }
+    );
+  } catch (e) {
+    status.textContent = "Caméra bloquée (autorisation refusée ?).";
+  }
+})();
 </script>
 </body>
 </html>
