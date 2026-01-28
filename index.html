@@ -49,6 +49,7 @@
   }
   .btnRow { display:flex; gap:10px; flex-wrap:wrap; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
@@ -60,6 +61,7 @@
     <div id="eventLine" class="bigEvent"></div>
   </div>
 
+  <!-- SCAN QR -->
   <div id="readerWrap">
     <div class="small" style="margin-bottom:8px;">
       Scanner le QR (iPhone : cliquez sur “Démarrer le scan”, puis autorisez la caméra).
@@ -74,13 +76,10 @@
 
     <div id="scanStatus" class="small" style="margin-top:8px;">En attente…</div>
     <div class="small mono" id="lastQr" style="margin-top:6px;"></div>
-
-    <div class="small" style="margin-top:10px;">
-      Si ton QR contient une URL complète, il doit ressembler à :
-      <div class="mono">https://.../?prenom=Jean&nom=Dupont&event=AG2026&t=ABC123</div>
-    </div>
   </div>
 
+  <!-- Zone signature -->
+  <div id="signatureArea"></div>
   <canvas id="sign"></canvas>
 
   <div class="btnRow">
@@ -108,72 +107,22 @@ function updateInfo() {
   document.getElementById("name").textContent = fullName || "Invité";
   document.getElementById("eventLine").textContent = current.event || "";
 }
+function setStatus(text) { document.getElementById("scanStatus").textContent = text; }
+function setMsg(text) { document.getElementById("msg").textContent = text; }
+function setLastQr(text) { document.getElementById("lastQr").textContent = text ? ("Dernier QR: " + text) : ""; }
 
-function setStatus(text) {
-  document.getElementById("scanStatus").textContent = text;
-}
-
-function setMsg(text) {
-  document.getElementById("msg").textContent = text;
-}
-
-function setLastQr(text) {
-  document.getElementById("lastQr").textContent = text ? ("Dernier QR: " + text) : "";
-}
-
-/** ========= Si on ouvre la page avec paramètres (mode test) ========= */
+/** ========= Test via paramètres URL (optionnel) ========= */
 (function loadFromPageUrlIfPresent(){
   const qs = new URLSearchParams(location.search);
   const p = qs.get("prenom");
   const n = qs.get("nom");
   const ev = qs.get("event");
   const t = qs.get("t");
-
   if (p || n || ev || t) {
-    current.prenom = p || "";
-    current.nom = n || "";
-    current.event = ev || "";
-    current.token = t || "";
+    current = { prenom: p || "", nom: n || "", event: ev || "", token: t || "" };
   }
   updateInfo();
 })();
-
-/** ========= Interprétation du contenu du QR =========
- * - Cas idéal: QR contient une URL complète avec ?prenom=&nom=&event=&t=
- * - Sinon: on garde le texte lu en "token" (à toi de décider côté Power Automate comment le traiter)
- */
-function applyFromQr(decodedText) {
-  setLastQr(decodedText);
-  setMsg("");
-
-  // Essaye de lire comme URL
-  try {
-    const u = new URL(decodedText);
-    const q = u.searchParams;
-
-    const prenom = q.get("prenom") || "";
-    const nom = q.get("nom") || "";
-    const event = q.get("event") || "";
-    const token = q.get("t") || "";
-
-    // Si au moins un champ est présent, on applique
-    if (prenom || nom || event || token) {
-      current = { prenom, nom, event, token };
-      updateInfo();
-      clearPad();
-      setStatus("QR détecté ✓");
-      return;
-    }
-  } catch (e) {
-    // pas une URL, on tombe dans le fallback
-  }
-
-  // Fallback: QR non URL -> on met tout en token
-  current = { prenom: "", nom: "", event: "", token: decodedText || "" };
-  updateInfo();
-  clearPad();
-  setStatus("QR détecté (texte). Il devrait idéalement contenir une URL complète.");
-}
 
 /** ========= Signature pad ========= */
 const canvas = document.getElementById("sign");
@@ -217,14 +166,102 @@ function clearPad(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
 }
 
-/** ========= Envoi ========= */
+/** ========= QR scanner iPhone-friendly ========= */
+let qr = null;
+let scanning = false;
+
+async function startScan(){
+  if (scanning) return;
+
+  try {
+    if (!qr) qr = new Html5Qrcode("reader");
+
+    setStatus("Démarrage caméra…");
+    setMsg("");
+
+    // iOS : démarrage après clic + forcer caméra arrière
+    await qr.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      async (decodedText) => {
+        await applyFromQr(decodedText);
+      },
+      (_err) => { /* bruit de scan -> ignorer */ }
+    );
+
+    scanning = true;
+    document.getElementById("btnStartScan").disabled = true;
+    document.getElementById("btnStopScan").disabled = false;
+    setStatus("Caméra prête. Présentez le QR code.");
+  } catch (e) {
+    scanning = false;
+    document.getElementById("btnStartScan").disabled = false;
+    document.getElementById("btnStopScan").disabled = true;
+    setStatus("Caméra bloquée. Vérifie : Safari + autorisation caméra (Réglages iOS > Safari > Caméra).");
+  }
+}
+
+async function stopScan(){
+  if (!qr || !scanning) return;
+  try { await qr.stop(); } catch(e) {}
+  scanning = false;
+  document.getElementById("btnStartScan").disabled = false;
+  document.getElementById("btnStopScan").disabled = true;
+  setStatus("Scan arrêté.");
+}
+
+/** ========= Appliquer le QR puis stop + aller signature ========= */
+async function applyFromQr(decodedText) {
+  setLastQr(decodedText);
+  setMsg("");
+
+  // Essaye de lire comme URL: ?prenom=&nom=&event=&t=
+  try {
+    const u = new URL(decodedText);
+    const q = u.searchParams;
+
+    const prenom = q.get("prenom") || "";
+    const nom = q.get("nom") || "";
+    const event = q.get("event") || "";
+    const token = q.get("t") || "";
+
+    if (prenom || nom || event || token) {
+      current = { prenom, nom, event, token };
+      updateInfo();
+      clearPad();
+      setStatus("QR détecté ✓");
+
+      // Stop scan dès détection
+      await stopScan();
+
+      // Cacher le scanner pendant la signature
+      document.getElementById("readerWrap").classList.add("hidden");
+
+      // Aller à la zone signature
+      document.getElementById("signatureArea").scrollIntoView({ behavior: "smooth" });
+
+      return;
+    }
+  } catch (e) {}
+
+  // Fallback: QR non URL -> tout en token
+  current = { prenom: "", nom: "", event: "", token: decodedText || "" };
+  updateInfo();
+  clearPad();
+  setStatus("QR détecté (texte).");
+
+  await stopScan();
+  document.getElementById("readerWrap").classList.add("hidden");
+  document.getElementById("signatureArea").scrollIntoView({ behavior: "smooth" });
+}
+
+/** ========= Envoi vers Power Automate + reset + prochain scan ========= */
 async function send(){
   if (!POWER_AUTOMATE_URL || POWER_AUTOMATE_URL === "TON_URL_POWER_AUTOMATE") {
-    setMsg("⚠️ Renseigne d'abord POWER_AUTOMATE_URL dans le code.");
+    setMsg("⚠️ Renseigne POWER_AUTOMATE_URL dans le code.");
     return;
   }
 
-  // Vérif minimale : au moins un token ou nom/prénom/event
   if (!current.token && !current.prenom && !current.nom && !current.event) {
     setMsg("Scanne d'abord un QR code.");
     return;
@@ -247,59 +284,31 @@ async function send(){
     });
 
     setMsg("✅ Signature enregistrée. Merci.");
+
+    // Pause courte, puis reset + relance scan
+    setTimeout(async () => {
+      current = { prenom: "", nom: "", event: "", token: "" };
+      updateInfo();
+      clearPad();
+      setLastQr("");
+      setStatus("Prêt pour le prochain QR.");
+
+      // Réafficher le scanner
+      document.getElementById("readerWrap").classList.remove("hidden");
+
+      // Remonter au scanner
+      document.getElementById("readerWrap").scrollIntoView({ behavior: "smooth" });
+
+      // Relancer le scan
+      await startScan();
+    }, 1200);
+
   } catch (e) {
     setMsg("❌ Erreur d'envoi (réseau ? URL Power Automate ?).");
   }
 }
 
-/** ========= QR scanner iPhone-friendly ========= */
-let qr = null;
-let scanning = false;
-
-async function startScan(){
-  if (scanning) return;
-
-  try {
-    if (!qr) qr = new Html5Qrcode("reader");
-
-    setStatus("Démarrage caméra…");
-    setMsg("");
-
-    // iOS : démarrage après clic + forcer caméra arrière
-    await qr.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: { width: 250, height: 250 } },
-      (decodedText) => {
-        applyFromQr(decodedText);
-      },
-      (_err) => {
-        // bruit de scan -> on ignore
-      }
-    );
-
-    scanning = true;
-    document.getElementById("btnStartScan").disabled = true;
-    document.getElementById("btnStopScan").disabled = false;
-    setStatus("Caméra prête. Présentez le QR code.");
-  } catch (e) {
-    scanning = false;
-    document.getElementById("btnStartScan").disabled = false;
-    document.getElementById("btnStopScan").disabled = true;
-
-    // Causes fréquentes iPhone: autorisation caméra refusée, page pas en HTTPS (GitHub ok), pas Safari…
-    setStatus("Caméra bloquée. Vérifie : Safari + autorisation caméra (Réglages iOS > Safari > Caméra).");
-  }
-}
-
-async function stopScan(){
-  if (!qr || !scanning) return;
-  try { await qr.stop(); } catch(e) {}
-  scanning = false;
-  document.getElementById("btnStartScan").disabled = false;
-  document.getElementById("btnStopScan").disabled = true;
-  setStatus("Scan arrêté.");
-}
-
+/** ========= Boutons ========= */
 document.getElementById("btnStartScan").addEventListener("click", startScan);
 document.getElementById("btnStopScan").addEventListener("click", stopScan);
 </script>
