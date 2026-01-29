@@ -109,6 +109,8 @@
     <div class="btnRow">
       <button id="btnStartScan">Démarrer le scan</button>
       <button id="btnStopScan" disabled>Arrêter le scan</button>
+      <!-- NOUVEAU: QR oublié -->
+      <button id="btnNoQr">QR oublié / Recherche mandataire</button>
     </div>
 
     <div id="reader" style="margin-top:10px;"></div>
@@ -120,8 +122,8 @@
   <canvas id="sign"></canvas>
 
   <div class="btnRow">
-    <button onclick="clearPad()">Effacer</button>
-    <button onclick="send()">Valider</button>
+    <button id="btnClear" onclick="clearPad()">Effacer</button>
+    <button id="btnSubmit" onclick="send()">Valider</button>
   </div>
 
   <div id="msg" class="small"></div>
@@ -148,6 +150,29 @@
     <div id="searchMsg" class="small"></div>
     <ul id="searchResults"></ul>
   </div>
+
+  <!-- NOUVEAU: MODAL Recherche mandataire (QR oublié) -->
+  <div id="modalMandataire" class="card hidden">
+    <div style="font-weight:800; margin-bottom:6px;">QR oublié — Recherche mandataire</div>
+    <div class="small">
+      Saisissez le nom/prénom du mandataire présent. Vous choisirez ensuite la bonne personne.
+      <br>⚠️ Assurez-vous de sélectionner la bonne organisation si homonymie.
+    </div>
+
+    <div style="margin-top:10px;" class="small">Nom</div>
+    <input id="inNomM" placeholder="DUPONT">
+
+    <div style="margin-top:10px;" class="small">Prénom</div>
+    <input id="inPrenomM" placeholder="Jean">
+
+    <div class="btnRow">
+      <button id="btnSearchM">Rechercher</button>
+      <button id="btnCloseM">Fermer</button>
+    </div>
+
+    <div id="searchMsgM" class="small"></div>
+    <ul id="searchResultsM"></ul>
+  </div>
 </div>
 
 <!-- Lecteur QR -->
@@ -160,15 +185,15 @@
  *    Entrée : { event, mandataireToken }
  *    Sortie : { status:"ok", represented:[{token, prenom, nom, kind:"PERSONNEL"|"POUVOIR_PRE"|"POUVOIR_JOURJ", org?}] , maxPowers:3 }
  *
- * 2) FLOW_SEARCH_INVITE : recherche mandant par nom/prénom dans Invites
+ * 2) FLOW_SEARCH_INVITE : recherche une personne dans Invites (mandataire OU mandant) par nom/prénom
  *    Entrée : { event, nom, prenom }
- *    Sortie : { results:[{token, prenom, nom, org?}] }
+ *    Sortie : { results:[{token, prenom, nom, org? , event?}] }
  *
  * 3) FLOW_ADD_POUVOIR : ajoute un pouvoir papier le jour J (et doit appliquer le max 3 côté serveur aussi)
  *    Entrée : { event, mandataireToken, mandantToken, note }
  *    Sortie : { status:"ok"|"max_reached"|"already_signed"|"already_assigned"|"invalid_mandant" }
  *
- * 4) FLOW_SUBMIT_SIGNATURE : crée le PNG + crée les lignes Emargement (le serveur recalcule les représentés)
+ * 4) FLOW_SUBMIT_SIGNATURE : crée le fichier signature + crée les lignes Emargement (le serveur recalcule les représentés)
  *    Entrée : { event, mandataireToken, signature, ts }
  *    Sortie : { status:"ok"|"already_signed"|"error", count? }
  */
@@ -176,6 +201,10 @@ const FLOW_GET_DELEGATIONS = "URL_FLOW_GET_DELEGATIONS";
 const FLOW_SEARCH_INVITE   = "URL_FLOW_SEARCH_INVITE";
 const FLOW_ADD_POUVOIR     = "URL_FLOW_ADD_POUVOIR";
 const FLOW_SUBMIT_SIGNATURE= "URL_FLOW_SUBMIT_SIGNATURE";
+
+// 1 seul événement : tu peux laisser vide si ton QR (ou ton flow) renvoie toujours event.
+// Sinon mets ici le texte exact que tu stockes dans ta colonne SharePoint "EventCode".
+const DEFAULT_EVENT = ""; // ex: "AG2026"
 
 const MAX_POWERS = 3; // affichage côté client (le serveur doit aussi bloquer)
 
@@ -193,6 +222,10 @@ function setMsg(text, cls){
 function setRepMsg(text, cls){
   $("repMsg").className = "small " + (cls || "");
   $("repMsg").textContent = text || "";
+}
+
+function ensureEvent(){
+  if (!current.event && DEFAULT_EVENT) current.event = DEFAULT_EVENT;
 }
 
 function updateInfo(){
@@ -314,7 +347,6 @@ async function startScan(){
 
 async function stopScan(){
   if (!qr || !scanning) return;
-  try { qr.pause(true); } catch(e) {}
   try { await qr.stop(); } catch(e) {}
   scanning = false;
   $("btnStartScan").disabled = false;
@@ -324,7 +356,6 @@ async function stopScan(){
 
 /** ========= Parse QR =========
  * QR idéal : URL complète avec ?prenom=&nom=&event=&t=
- * ex: https://.../?prenom=Jean&nom=Dupont&event=AG2026&t=ABC123
  */
 function parseQr(decodedText){
   try {
@@ -344,6 +375,8 @@ function parseQr(decodedText){
 
 /** ========= Charger les pouvoirs (pré-enregistrés + jour J) ========= */
 async function loadDelegations(){
+  ensureEvent();
+
   if (!FLOW_GET_DELEGATIONS || FLOW_GET_DELEGATIONS.startsWith("URL_")) {
     // si tu n'as pas encore le flow, on affiche seulement le mandataire
     represented = [];
@@ -386,6 +419,7 @@ async function loadDelegations(){
 /** ========= Quand un QR est lu ========= */
 async function handleQr(decodedText){
   current = parseQr(decodedText);
+  ensureEvent();
   updateInfo();
   clearPad();
   setMsg("");
@@ -404,9 +438,92 @@ async function handleQr(decodedText){
   setTimeout(() => $("readerWrap").classList.add("hidden"), 300);
 }
 
+/** ========= NOUVEAU: QR oublié / recherche mandataire ========= */
+$("btnNoQr").addEventListener("click", async () => {
+  // si scan en cours, on stop pour libérer la caméra
+  try { await stopScan(); } catch(e) {}
+
+  $("modalMandataire").classList.remove("hidden");
+  $("searchMsgM").textContent = "";
+  $("searchResultsM").innerHTML = "";
+  $("inNomM").value = "";
+  $("inPrenomM").value = "";
+});
+
+$("btnCloseM").addEventListener("click", () => {
+  $("modalMandataire").classList.add("hidden");
+});
+
+async function setMandataireFromSearch(cand){
+  current = {
+    prenom: cand.prenom || "",
+    nom: cand.nom || "",
+    event: cand.event || current.event || DEFAULT_EVENT || "",
+    token: cand.token || ""
+  };
+  ensureEvent();
+  updateInfo();
+  clearPad();
+  setMsg("");
+  setStatus("Mandataire sélectionné ✓");
+
+  // Charge mandats
+  await loadDelegations();
+
+  // Cache scanner + ferme modal
+  $("modalMandataire").classList.add("hidden");
+  $("readerWrap").classList.add("hidden");
+  $("signatureArea").scrollIntoView({ behavior:"smooth" });
+}
+
+$("btnSearchM").addEventListener("click", async () => {
+  const nom = ($("inNomM").value || "").trim();
+  const prenom = ($("inPrenomM").value || "").trim();
+
+  if (!nom || !prenom) { $("searchMsgM").textContent = "Renseignez Nom + Prénom."; return; }
+  if (!FLOW_SEARCH_INVITE || FLOW_SEARCH_INVITE.startsWith("URL_")) {
+    $("searchMsgM").textContent = "FLOW_SEARCH_INVITE non configuré.";
+    return;
+  }
+
+  // event obligatoire côté serveur : on met DEFAULT_EVENT si besoin
+  const event = current.event || DEFAULT_EVENT || "";
+
+  $("searchMsgM").textContent = "Recherche…";
+  $("searchResultsM").innerHTML = "";
+
+  try {
+    const r = await fetch(FLOW_SEARCH_INVITE, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ event, nom, prenom })
+    });
+    const j = await r.json();
+    const results = j.results || [];
+
+    if (!results.length) { $("searchMsgM").textContent = "Aucun résultat."; return; }
+
+    $("searchMsgM").textContent = "Sélectionnez la bonne personne :";
+    const ul = $("searchResultsM");
+
+    results.forEach(cand => {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.textContent = `Choisir : ${cand.prenom} ${cand.nom}${cand.org ? " — " + cand.org : ""}`;
+      btn.onclick = () => setMandataireFromSearch(cand);
+      li.appendChild(btn);
+      ul.appendChild(li);
+    });
+
+  } catch (e) {
+    $("searchMsgM").textContent = "Erreur réseau.";
+  }
+});
+
 /** ========= Modal ajout pouvoir papier ========= */
 $("btnAddPouvoir").addEventListener("click", () => {
-  if (!current.token || !current.event) { setRepMsg("Scannez d’abord le QR du mandataire.", "danger"); return; }
+  ensureEvent();
+  if (!current.token || !current.event) { setRepMsg("Scannez d’abord le QR du mandataire (ou utilisez “QR oublié”).", "danger"); return; }
   if (countPowers() >= MAX_POWERS) { setRepMsg("Maximum de 3 pouvoirs atteint.", "danger"); return; }
 
   $("modal").classList.remove("hidden");
@@ -419,6 +536,7 @@ $("btnClose").addEventListener("click", () => {
 });
 
 $("btnSearch").addEventListener("click", async () => {
+  ensureEvent();
   const nom = ($("inNom").value || "").trim();
   const prenom = ($("inPrenom").value || "").trim();
   const note = ($("inNote").value || "").trim();
@@ -477,8 +595,7 @@ $("btnSearch").addEventListener("click", async () => {
 
         if (j2.status === "ok") {
           $("searchMsg").textContent = "Pouvoir ajouté ✅";
-          // Recharger la liste depuis le serveur (source de vérité)
-          await loadDelegations();
+          await loadDelegations(); // reload depuis serveur
         } else if (j2.status === "max_reached") {
           $("searchMsg").textContent = "Maximum 3 pouvoirs déjà atteints.";
         } else if (j2.status === "already_signed") {
@@ -506,16 +623,22 @@ $("btnSearch").addEventListener("click", async () => {
  * Le serveur recalcule la liste des représentés (pré + jour J) et applique le max=3.
  */
 async function send(){
+  ensureEvent();
+
   if (!FLOW_SUBMIT_SIGNATURE || FLOW_SUBMIT_SIGNATURE.startsWith("URL_")) {
     setMsg("⚠️ Configure FLOW_SUBMIT_SIGNATURE dans le code.", "danger");
     return;
   }
   if (!current.token || !current.event) {
-    setMsg("Scannez d’abord le QR du mandataire.", "danger");
+    setMsg("Scannez d’abord le QR du mandataire (ou utilisez “QR oublié”).", "danger");
     return;
   }
 
-  const img = canvas.toDataURL("image/png");
+  // COMPRESSE (recommandé pour Power Automate / HTTP) :
+  const img = canvas.toDataURL("image/jpeg", 0.75);
+
+  const btn = $("btnSubmit");
+  btn.disabled = true;
 
   setMsg("Envoi…", "");
   try {
@@ -544,7 +667,6 @@ async function send(){
 
     // Reset + prochain scan
     setTimeout(async () => {
-      // reset état
       current = { prenom:"", nom:"", event:"", token:"" };
       represented = [];
       updateInfo();
@@ -552,19 +674,19 @@ async function send(){
       clearPad();
       setRepMsg("", "");
 
-      // UI
       $("modal").classList.add("hidden");
+      $("modalMandataire").classList.add("hidden");
       $("readerWrap").classList.remove("hidden");
       $("readerWrap").scrollIntoView({ behavior:"smooth" });
 
-      // relance scan
       await startScan();
     }, 1200);
 
   } catch (e) {
     setMsg("❌ Erreur réseau (connexion ?).", "danger");
-    // autorise un rescan si besoin
     scanLocked = false;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -583,9 +705,11 @@ $("btnStopScan").addEventListener("click", stopScan);
   const t = qs.get("t");
   if (p || n || ev || t) {
     current = { prenom: p || "", nom: n || "", event: ev || "", token: t || "" };
+    ensureEvent();
     updateInfo();
     loadDelegations();
   } else {
+    ensureEvent();
     updateInfo();
     renderRepresented();
   }
